@@ -4,7 +4,9 @@ import {
   bearerToken,
   isUuid,
   likeTerm,
+  parseHmsFaultPayload,
   parsePagination,
+  parseHmsRestorationPayload,
   parseStatus,
   routePath,
   searchParts,
@@ -15,6 +17,10 @@ const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const anonKey = Deno.env.get("SUPABASE_ANON_KEY") ??
   Deno.env.get("SUPABASE_PUBLISHABLE_KEY")!;
 const ingestApiKey = Deno.env.get("TICKETS_API_KEY") ?? "";
+// Server-to-server bearer credential. The old name remains a deployment
+// compatibility fallback; new installs should set HMS_API_TOKEN.
+const hmsSecret = Deno.env.get("HMS_API_TOKEN") ??
+  Deno.env.get("HMS_WEBHOOK_SECRET") ?? "";
 
 const admin = createClient(supabaseUrl, serviceKey, {
   auth: { persistSession: false },
@@ -30,6 +36,7 @@ function newAuthClient() {
 const TICKET_SELECT = `
   id, ticket_number, branch_id, device_id, si_user_id, status, escalation_level,
   created_at, updated_at, resolved_at, resolved_by, resolution_note,
+  issue_description, source_system, source_event_id, assigned_si_name, assigned_si_email,
   branches ( id, name, code, zones ( id, name, nbgs ( id, name ) ) ),
   devices ( id, serial_number, type ),
   si_user:profiles!tickets_si_user_id_fkey ( id, name, email )
@@ -38,14 +45,17 @@ const TICKET_SELECT = `
 const TICKET_DETAIL_SELECT = `
   id, ticket_number, branch_id, device_id, si_user_id, status, escalation_level,
   created_at, updated_at, resolved_at, resolved_by, resolution_note,
+  issue_description, source_system, source_event_id, assigned_si_name, assigned_si_email,
   branches ( id, name, code, zones ( id, name, nbgs ( id, name ) ) ),
-  devices ( id, serial_number, type, status, status_since ),
+  devices ( id, serial_number, type ),
   si_user:profiles!tickets_si_user_id_fkey ( id, name, email ),
   resolver:profiles!tickets_resolved_by_fkey ( name, email ),
   ticket_events (
     id, ticket_id, event_type, actor_id, actor_role, note, created_at,
     actor:profiles!ticket_events_actor_id_fkey ( name, email )
   ),
+  hms_events ( id, source_event_id, event_type, correlation_event_id, issue_description, occurred_at, received_at, processing_status ),
+  ticket_escalations ( id, escalation_level, due_at, processed_at, recipient, email_outcome ),
   email_outbox ( id, subject, status, sent_at, created_at, error )
 `;
 
@@ -229,6 +239,15 @@ async function listTickets(req: Request, url: URL): Promise<Response> {
   }
 
   const deviceSerial = params.get("device_serial")?.trim();
+  const deviceType = params.get("device_type")?.trim();
+  if (deviceType && deviceType.length > 100) {
+    return json({ error: "device_type cannot exceed 100 characters" }, 400);
+  }
+
+  const siUserId = params.get("si_user_id");
+  if (siUserId && !isUuid(siUserId)) {
+    return json({ error: "si_user_id must be a UUID" }, 400);
+  }
 
   const escalation = params.get("escalation_level");
   if (escalation !== null && escalation !== "") {
@@ -246,6 +265,8 @@ async function listTickets(req: Request, url: URL): Promise<Response> {
   if (status) query = query.eq("status", status);
   if (branchId) query = query.eq("branch_id", branchId);
   if (deviceId) query = query.eq("device_id", deviceId);
+  if (deviceType) query = query.eq("devices.type", deviceType);
+  if (siUserId) query = query.eq("si_user_id", siUserId);
   if (escalation !== null && escalation !== "") {
     query = query.eq("escalation_level", Number(escalation));
   }
@@ -255,9 +276,9 @@ async function listTickets(req: Request, url: URL): Promise<Response> {
 
   const dateFilters = [
     ["from", "created_at", "gte"],
-    ["to", "created_at", "lte"],
+    ["to", "created_at", "lt"],
     ["resolved_from", "resolved_at", "gte"],
-    ["resolved_to", "resolved_at", "lte"],
+    ["resolved_to", "resolved_at", "lt"],
   ] as const;
 
   for (const [name, column, op] of dateFilters) {
@@ -269,7 +290,7 @@ async function listTickets(req: Request, url: URL): Promise<Response> {
     }
     query = op === "gte"
       ? query.gte(column, date.toISOString())
-      : query.lte(column, date.toISOString());
+      : query.lt(column, date.toISOString());
   }
 
   if (deviceSerial) {
@@ -344,7 +365,34 @@ async function getTicket(req: Request, id: string): Promise<Response> {
   if (error) return json({ error: error.message }, 500);
   if (!data) return json({ error: "Ticket not found" }, 404);
 
-  return json({ data });
+  let currentSiAssignment: {
+    si_user_id: string;
+    profiles: { id: string; name: string; email: string } | null;
+  } | null = null;
+  if (data.device_id) {
+    const { data: deviceAssignment, error: deviceAssignmentError } = await db
+      .from("device_si_assignments")
+      .select("si_user_id, profiles:profiles!device_si_assignments_si_user_id_fkey (id, name, email)")
+      .eq("device_id", data.device_id)
+      .eq("is_active", true)
+      .maybeSingle();
+    if (deviceAssignmentError) return json({ error: deviceAssignmentError.message }, 500);
+    currentSiAssignment = deviceAssignment;
+  }
+  if (!currentSiAssignment) {
+    const { data: branchAssignment, error: assignmentError } = await db
+      .from("branch_si_assignments")
+      .select("si_user_id, profiles:profiles!branch_si_assignments_si_user_id_fkey (id, name, email)")
+      .eq("branch_id", data.branch_id)
+      .eq("is_active", true)
+      .order("assigned_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (assignmentError) return json({ error: assignmentError.message }, 500);
+    currentSiAssignment = branchAssignment;
+  }
+
+  return json({ data: { ...data, current_si_assignment: currentSiAssignment } });
 }
 
 async function ticketStats(req: Request): Promise<Response> {
@@ -386,6 +434,36 @@ async function listBranches(req: Request): Promise<Response> {
   if (error) return json({ error: error.message }, 500);
 
   return json({ data: data ?? [] });
+}
+
+async function ticketFilterOptions(req: Request): Promise<Response> {
+  const db = await userDb(req);
+  if (!db) return json({ error: "Missing or invalid Bearer token" }, 401);
+
+  const [branches, devices, branchAssignments, deviceAssignments] = await Promise.all([
+    db.from("branches").select("id, name, code").order("name"),
+    db.from("devices").select("type").order("type"),
+    db.from("branch_si_assignments")
+      .select("si_user_id, profiles:profiles!branch_si_assignments_si_user_id_fkey (id, name, email)")
+      .eq("is_active", true),
+    db.from("device_si_assignments")
+      .select("si_user_id, profiles:profiles!device_si_assignments_si_user_id_fkey (id, name, email)")
+      .eq("is_active", true),
+  ]);
+  const error = branches.error ?? devices.error ?? branchAssignments.error ?? deviceAssignments.error;
+  if (error) return json({ error: error.message }, 500);
+
+  const siUsersById = new Map<string, { id: string; name: string; email: string }>();
+  for (const row of [...(branchAssignments.data ?? []), ...(deviceAssignments.data ?? [])]) {
+    const si = row.profiles as unknown as { id: string; name: string; email: string } | null;
+    if (si) siUsersById.set(si.id, si);
+  }
+
+  return json({
+    branches: branches.data ?? [],
+    device_types: [...new Set((devices.data ?? []).map((row) => row.type))],
+    si_users: [...siUsersById.values()].sort((a, b) => a.name.localeCompare(b.name)),
+  });
 }
 
 interface BreakdownRow {
@@ -495,23 +573,45 @@ async function createTicket(req: Request): Promise<Response> {
   }
 
   let siUserId = typeof siInput === "string" ? siInput : null;
+  let siSnapshot: { name: string; email: string } | null = null;
   if (siUserId) {
-    const { data: si } = await admin
+    const { data: si, error: siError } = await admin
       .from("profiles")
-      .select("id, role")
+      .select("id, role, name, email")
       .eq("id", siUserId)
       .maybeSingle();
+    if (siError) return json({ error: siError.message }, 500);
     if (!si || si.role !== "si") {
       return json({ error: "si_user_id must reference an SI user" }, 400);
     }
+    siSnapshot = { name: si.name, email: si.email };
   } else {
-    const { data: assignment } = await admin
-      .from("branch_si_assignments")
-      .select("si_user_id")
-      .eq("branch_id", branchId)
-      .eq("is_active", true)
-      .maybeSingle();
-    siUserId = assignment?.si_user_id ?? null;
+    let assignedProfile: { name: string; email: string } | null = null;
+    if (deviceId) {
+      const { data: deviceAssignment, error: deviceAssignmentError } = await admin
+        .from("device_si_assignments")
+        .select("si_user_id, profiles:profiles!device_si_assignments_si_user_id_fkey (name, email)")
+        .eq("device_id", deviceId)
+        .eq("is_active", true)
+        .maybeSingle();
+      if (deviceAssignmentError) return json({ error: deviceAssignmentError.message }, 500);
+      siUserId = deviceAssignment?.si_user_id ?? null;
+      assignedProfile = deviceAssignment?.profiles as unknown as { name: string; email: string } | null;
+    }
+    if (!siUserId) {
+      const { data: assignment, error: assignmentError } = await admin
+        .from("branch_si_assignments")
+        .select("si_user_id, profiles:profiles!branch_si_assignments_si_user_id_fkey (name, email)")
+        .eq("branch_id", branchId)
+        .eq("is_active", true)
+        .order("assigned_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (assignmentError) return json({ error: assignmentError.message }, 500);
+      siUserId = assignment?.si_user_id ?? null;
+      assignedProfile = assignment?.profiles as unknown as { name: string; email: string } | null;
+    }
+    if (assignedProfile) siSnapshot = assignedProfile;
   }
 
   const { data: ticket, error: insertError } = await admin
@@ -521,6 +621,9 @@ async function createTicket(req: Request): Promise<Response> {
       device_id: (deviceId as string | undefined) ?? null,
       si_user_id: siUserId,
       status: "open",
+      issue_description: note,
+      assigned_si_name: siSnapshot?.name ?? null,
+      assigned_si_email: siSnapshot?.email ?? null,
     })
     .select()
     .single();
@@ -537,6 +640,105 @@ async function createTicket(req: Request): Promise<Response> {
   }
 
   return json({ data: ticket }, 201);
+}
+
+// ============================================================
+// HMS (Dexter) webhook
+// ============================================================
+
+function hmsAuthorized(req: Request): boolean {
+  if (!hmsSecret) return false;
+  const supplied = bearerToken(req.headers.get("Authorization"));
+  if (!supplied || supplied.length !== hmsSecret.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < supplied.length; i++) {
+    mismatch |= supplied.charCodeAt(i) ^ hmsSecret.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
+async function hmsFault(req: Request): Promise<Response> {
+  if (!hmsSecret) return json({ error: "HMS_API_TOKEN is not configured" }, 503);
+  if (!hmsAuthorized(req)) return json({ error: "Invalid Bearer token" }, 401);
+
+  const body = await readJsonObject(req);
+  const fault = parseHmsFaultPayload(body);
+  if (!fault) {
+    return json({
+      error: "Expected event_id, branch_key, device_key, issue_description, and optional ISO occurred_at",
+    }, 400);
+  }
+
+  const { data, error } = await admin.rpc("process_hms_fault", {
+    p_source_event_id: fault.event_id,
+    p_branch_key: fault.branch_key,
+    p_device_key: fault.device_key,
+    p_issue_description: fault.issue_description,
+    p_occurred_at: fault.occurred_at,
+    p_payload: body,
+  });
+  if (error) {
+    console.error(JSON.stringify({
+      event: "hms_fault_failed",
+      correlation_id: fault.event_id,
+      code: error.code,
+    }));
+    return json({ error: "HMS fault event could not be processed", event_id: fault.event_id }, 500);
+  }
+
+  const result = data as Record<string, unknown>;
+  console.info(JSON.stringify({
+    event: "hms_fault_processed",
+    correlation_id: fault.event_id,
+    processing_result: result.processing_result,
+    ticket_id: result.ticket_id,
+  }));
+  if (result.processing_result === "unmatched") return json(result, 404);
+  if (result.duplicate === true || result.existing_open_ticket === true) {
+    return json(result, 200);
+  }
+  return json(result, 201);
+}
+
+async function hmsRestoration(req: Request): Promise<Response> {
+  if (!hmsSecret) return json({ error: "HMS_API_TOKEN is not configured" }, 503);
+  if (!hmsAuthorized(req)) return json({ error: "Invalid Bearer token" }, 401);
+
+  const body = await readJsonObject(req);
+  const restoration = parseHmsRestorationPayload(body);
+  if (!restoration) {
+    return json({
+      error: "Expected event_id, correlation_event_id, and optional ISO occurred_at",
+    }, 400);
+  }
+
+  const { data, error } = await admin.rpc("process_hms_restoration", {
+    p_source_event_id: restoration.event_id,
+    p_correlation_event_id: restoration.correlation_event_id,
+    p_occurred_at: restoration.occurred_at,
+    p_payload: body,
+  });
+  if (error) {
+    console.error(JSON.stringify({
+      event: "hms_restoration_failed",
+      correlation_id: restoration.event_id,
+      code: error.code,
+    }));
+    return json({
+      error: "HMS restoration event could not be processed",
+      event_id: restoration.event_id,
+    }, 500);
+  }
+
+  const result = data as Record<string, unknown>;
+  console.info(JSON.stringify({
+    event: "hms_restoration_processed",
+    correlation_id: restoration.event_id,
+    processing_result: result.processing_result,
+    ticket_id: result.ticket_id,
+  }));
+  if (result.processing_result === "unmatched") return json(result, 404);
+  return json(result, 200);
 }
 
 // ============================================================
@@ -600,8 +802,24 @@ async function handle(req: Request): Promise<Response> {
       : methodNotAllowed("GET");
   }
 
+  if (path === "/v1/hms/fault") {
+    return req.method === "POST" ? hmsFault(req) : methodNotAllowed("POST");
+  }
+
+  if (path === "/v1/hms/restoration") {
+    return req.method === "POST"
+      ? hmsRestoration(req)
+      : methodNotAllowed("POST");
+  }
+
   if (path === "/branches") {
     return req.method === "GET" ? listBranches(req) : methodNotAllowed("GET");
+  }
+
+  if (path === "/ticket-filters") {
+    return req.method === "GET"
+      ? ticketFilterOptions(req)
+      : methodNotAllowed("GET");
   }
 
   if (path === "/tickets") {

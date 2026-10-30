@@ -1,5 +1,4 @@
 export type UserRole = 'head_office' | 'nbg' | 'zonal' | 'branch' | 'si'
-export type DeviceStatus = 'ok' | 'fault' | 'system_off'
 export type TicketStatus = 'open' | 'resolved'
 export type EmailStatus = 'pending' | 'sent' | 'failed'
 
@@ -49,20 +48,13 @@ export interface BranchSiAssignment {
 export interface Device {
   id: string
   branch_id: string
+  // Dexter (HMS) panels have hms_panel_id = null; monitored devices (BAS, FAS,
+  // Timelock, Access Control, CCTV) point at their branch's panel. There is no
+  // live status column: shown status derives from open tickets.
+  hms_panel_id?: string | null
   type: string
   serial_number: string
-  status: DeviceStatus
-  status_since: string
-  last_seen: string | null
   created_at: string
-}
-
-export interface DeviceStatusLog {
-  id: string
-  device_id: string
-  previous_status: DeviceStatus | null
-  new_status: DeviceStatus
-  changed_at: string
 }
 
 export interface Ticket {

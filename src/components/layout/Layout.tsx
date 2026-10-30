@@ -1,6 +1,6 @@
 import { Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '../../hooks/useAuth'
-import { LogOut, LayoutDashboard, FileText, HardDrive, ShieldAlert, Users, Settings } from 'lucide-react'
+import { LogOut, LayoutDashboard, FileText, HardDrive, ShieldAlert, Users } from 'lucide-react'
 import ThemeToggle from '../theme/ThemeToggle'
 
 const SIDEBAR_ITEMS = [
@@ -11,7 +11,6 @@ const SIDEBAR_ITEMS = [
 
 const HO_ONLY_ITEMS = [
   { path: '/assign-si', label: 'Assign SI', icon: ShieldAlert },
-  { path: '/insights', label: 'Insights', icon: Settings },
   { path: '/users', label: 'Users', icon: Users },
 ]
 
@@ -28,7 +27,7 @@ export default function Layout() {
 
   return (
     <div className="flex h-screen bg-[var(--background)]">
-      <aside className="w-64 border-r border-[var(--border)] bg-[var(--surface)] flex flex-col">
+      <aside className="no-print w-64 border-r border-[var(--border)] bg-[var(--surface)] flex flex-col">
         <div className="p-6">
           <h1 className="text-xl font-bold tracking-tight">S-Watch 360</h1>
           <p className="text-xs text-[var(--text-muted)] mt-1">{profile?.role.replace('_', ' ')}</p>
@@ -58,7 +57,7 @@ export default function Layout() {
         </div>
       </aside>
       <main className="flex-1 overflow-y-auto bg-[var(--background)] p-6">
-        <header className="mb-6 flex items-center justify-between gap-4">
+        <header className="no-print mb-6 flex items-center justify-between gap-4">
           <div>
             <h2 className="text-2xl font-semibold">{currentPageTitle(location.pathname)}</h2>
             <p className="text-sm text-[var(--text-muted)]">{profile?.email}</p>

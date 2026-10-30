@@ -1,12 +1,12 @@
 # S-Watch 360 Desk
 
-Device monitoring, automatic service ticketing, and SI escalation for bank branches.
+SDesk360 manages service tickets for devices across bank branches. HMS owns device-health monitoring and sends fault and restoration events; SDesk360 does not poll or independently determine device health.
 
 ## Stack
 
-- React 18 + TypeScript (Vite), Tailwind CSS, React Router, TanStack Query, `@supabase/supabase-js`
+- React + TypeScript (Vite), Tailwind CSS, React Router, TanStack Query, `@supabase/supabase-js`
 - Backend: Supabase only (Postgres, Auth, Row Level Security, Edge Functions, `pg_cron`, `pg_net`)
-- PDF export: `jspdf` + `html2canvas`
+- Reports use the browser print dialog; choose **Save as PDF** to export.
 
 No Docker anywhere. Runs against a hosted Supabase project.
 
@@ -19,7 +19,7 @@ No Docker anywhere. Runs against a hosted Supabase project.
 
 1. Copy environment variables:
    ```bash
-   cp .env.example .env
+   cp .env.example .env.local
    ```
 2. Fill in `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` from your Supabase project settings (API section). The client also accepts `VITE_SUPABASE_ANON_KEY` for existing local setups.
 3. Install dependencies:
@@ -27,19 +27,20 @@ No Docker anywhere. Runs against a hosted Supabase project.
    npm install
    ```
 4. Apply the database migrations to your hosted project:
-   - Open the SQL editor in your Supabase dashboard, or
-   - Run `npx supabase db push` against your linked remote project.
-   Migrations live in `supabase/migrations/` and seed data in `supabase/migrations/0003_seed.sql`.
+   - Open the Supabase SQL Editor and apply unapplied files from `supabase/migrations/` in filename order.
+   - Do not run `supabase start`; local development uses the hosted database and does not require Docker.
+   Migrations live in `supabase/migrations/`; the initial demo seed is in `0003_seed.sql`.
 5. Deploy Edge Functions:
    ```bash
-   npx supabase functions deploy device-status
-   npx supabase functions deploy send-emails
+   npx supabase functions deploy send-emails --no-verify-jwt
    npx supabase functions deploy invite-user
    npx supabase functions deploy api --no-verify-jwt
    ```
 6. Set Edge Function secrets (from Supabase dashboard → Edge Function → Settings):
-   - `SENDGRID_API_KEY` (or your email provider key) for `send-emails`
+   - `EMAIL_SEND_URL` and `EMAIL_API_KEY` for the selected email provider (optional; without them, delivery is recorded as not configured/failed)
    - `TICKETS_API_KEY` (a long random string) for machine ticket ingestion through `api`
+   - `HMS_API_TOKEN` (a long random string) for HMS fault and restoration events
+   - `SCHEDULED_JOB_SECRET` (a long random string) for scheduled email delivery
 7. Enable `pg_cron` and `pg_net` extensions in your Supabase project (SQL editor):
    ```sql
    create extension if not exists pg_cron;
@@ -51,16 +52,79 @@ No Docker anywhere. Runs against a hosted Supabase project.
    ```
    Open http://localhost:5173
 
-## Simulating a device fault
+## HMS event API
 
-Use the authenticated `device-status` Edge Function:
+The `api` Edge Function exposes fault and restoration endpoints. Authentication
+uses `Authorization: Bearer <HMS_API_TOKEN>`. Event IDs are unique within the
+`hms` source namespace. Replaying the same event ID returns its stored result
+without repeating a ticket transition.
+
+Faults create tickets immediately. The current active-ticket rule is one open
+ticket per device: a distinct fault received while that ticket remains open is
+appended to its issue description and audit history. A new fault after
+resolution creates a new ticket. Restoration events must reference the original
+fault `event_id` in `correlation_event_id`; unmatched events are recorded and
+return a controlled 404 response.
+
+Base URL: `https://<project-ref>.supabase.co/functions/v1/api/v1/hms`
+
+Fault request:
+
 ```bash
-curl -X POST https://<project>.supabase.co/functions/v1/device-status \
-  -H "Authorization: Bearer <user-jwt>" \
+curl -X POST https://<project>.supabase.co/functions/v1/api/v1/hms/fault \
+  -H "Authorization: Bearer $HMS_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"serial": "SN-0001", "status": "fault"}'
+  -d '{"event_id":"fault-2026-0001","branch_key":"BA","device_key":"BA-TLK","issue_description":"Timelock unreachable","occurred_at":"2026-10-29T08:30:00Z"}'
 ```
-Leave a device in `fault` for 24 hours (backdate `status_since` via SQL for testing) and the `generate_tickets()` cron job (every 5 minutes) creates a ticket.
+
+Success returns the event ID, processing result, ticket ID/number, and whether
+the event was a retry or appended to an existing open ticket. Mapping failures
+are saved to `hms_events` and return `processing_result: unmatched`.
+
+```json
+{
+  "event_id": "fault-2026-0001",
+  "processing_result": "processed",
+  "ticket_id": "<ticket-uuid>",
+  "ticket_number": "SW-000123",
+  "existing_open_ticket": false
+}
+```
+
+Restoration request:
+
+```bash
+curl -X POST https://<project>.supabase.co/functions/v1/api/v1/hms/restoration \
+  -H "Authorization: Bearer $HMS_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"event_id":"restore-2026-0001","correlation_event_id":"fault-2026-0001","occurred_at":"2026-10-29T09:15:00Z"}'
+```
+
+The restoration resolves only the ticket created or associated with that fault
+event. Replays are safe, and unrelated tickets are never matched by device
+alone.
+
+```json
+{
+  "event_id": "restore-2026-0001",
+  "processing_result": "resolved",
+  "ticket_id": "<ticket-uuid>",
+  "ticket_number": "SW-000123"
+}
+```
+
+Set `HMS_API_TOKEN` and `SCHEDULED_JOB_SECRET` as Edge Function secrets. For
+scheduled email delivery, add these values to Supabase Vault before applying
+the lifecycle migration:
+
+```sql
+select vault.create_secret('https://<project-ref>.supabase.co', 'sdesk360_function_url');
+select vault.create_secret('<same value as SCHEDULED_JOB_SECRET>', 'sdesk360_scheduled_secret');
+```
+
+Escalations are evaluated by hosted `pg_cron` at 24, 48, and 72 hours. Each
+ticket/level is recorded once in `ticket_escalations`. Missing SI email is
+recorded as `not_configured`; an absent email provider never appears as sent.
 
 ## Ticket API (Edge Function `api`)
 
@@ -99,16 +163,22 @@ normal Supabase Auth JWTs, so the same RLS policies that protect the app protect
 | GET | `/tickets/stats` | Total, open, resolved, escalated and today's counts |
 | GET | `/tickets/breakdown` | Scoped open/resolved/escalated counts per branch and device |
 | GET | `/branches` | Branches visible to the caller (filter dropdown) |
+| GET | `/ticket-filters` | Scoped branch, device category, and assigned SI options |
 | POST | `/tickets` | Receive a ticket (`x-api-key` or Head Office Bearer) |
+| POST | `/v1/hms/fault` | Authenticated HMS fault event |
+| POST | `/v1/hms/restoration` | Idempotent HMS restoration event |
 | GET | `/health` | Database health check (public) |
 
 `/tickets` query parameters: `status` (`open`/`resolved`, case-insensitive), `escalation_level`
 (0–3), `escalated` (`true` for any level above 0), `branch_id`, `device_id`, `device_serial`
-(partial serial match), `from` / `to` (ISO dates on `created_at`), `resolved_from` / `resolved_to`
-(ISO dates on `resolved_at`), `search` (ticket number, branch name or code, device serial), `page`
+(partial serial match), `from` / `to` (ISO lower and exclusive upper bounds on `created_at`), `resolved_from` / `resolved_to`
+(ISO lower and exclusive upper bounds on `resolved_at`), `search` (ticket number, branch name or code, device serial), `page`
 (default 1), `limit` (default 20, max 100), `sort` (`created_at`, `updated_at`, `ticket_number`,
 `escalation_level`, `status`) and `order` (`asc`/`desc`). List responses return
 `{ data, page, limit, total, totalPages }`.
+
+Additional filters include `device_type` and `si_user_id`. The current viewer's
+RLS scope applies to the list and to filter-option queries.
 
 ```bash
 # 1. Get a JWT
@@ -134,12 +204,39 @@ The React app uses this API for login/session, the dashboard, the ticket list an
 Ticket notes and resolution still go through the existing Supabase RPCs. Apply migration
 `0005_ticket_breakdown.sql` with the other migrations; the dashboard breakdown depends on it.
 
+The HMS lifecycle migration adds stable external keys, immutable source event
+records, assignment snapshots, and per-level escalation records. It preserves
+existing device and ticket rows. Apply all migrations, including
+`20261029060741_sdesk360_hms_event_lifecycle.sql`, before deploying the updated
+`api` and `send-emails` functions.
+
+## Product decisions and configuration
+
+- HMS source event IDs are unique per source system; this integration uses the
+  single source namespace `hms`.
+- A distinct fault received while a device already has an open ticket is
+  appended to that ticket's history. This carries forward the existing
+  one-open-ticket-per-device behavior. A fault after resolution starts a new
+  ticket.
+- Dashboard date boundaries use `Asia/Kolkata`; stored timestamps remain UTC.
+- The email provider endpoint and credentials are deployment configuration.
+  Until configured, escalation records remain visible and delivery is not
+  reported as successful.
+- Branch/device `external_key` values are optional and preferred for HMS
+  mapping. Existing branch codes and device serial numbers remain valid
+  fallback keys; production integrations should populate stable external keys.
+
 Unit tests for the API helpers:
 
 ```bash
 cd supabase/functions/api
 deno test
+deno check index.ts
 ```
+
+The database lifecycle regression script is
+`supabase/tests/hms_lifecycle.sql`. Run it only against a disposable hosted
+development project after migrations; its transaction rolls back its fixtures.
 
 ## Demo accounts
 

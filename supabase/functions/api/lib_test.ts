@@ -3,6 +3,9 @@ import {
   bearerToken,
   isUuid,
   likeTerm,
+  parseHmsFaultPayload,
+  parseHmsEvent,
+  parseHmsRestorationPayload,
   parsePagination,
   parseStatus,
   routePath,
@@ -12,6 +15,7 @@ import {
 Deno.test("routePath strips the function prefix and trailing slashes", () => {
   assertEquals(routePath("/functions/v1/api/tickets"), "/tickets");
   assertEquals(routePath("/functions/v1/api/tickets/abc"), "/tickets/abc");
+  assertEquals(routePath("/functions/v1/api/v1/hms/fault"), "/v1/hms/fault");
   assertEquals(routePath("/api/tickets/"), "/tickets");
   assertEquals(routePath("/functions/v1/api"), "/");
 });
@@ -78,4 +82,52 @@ Deno.test("searchParts includes branch and device matches", () => {
     searchParts("atm", ["b1"], ["d1"]),
     "ticket_number.ilike.%atm%,branch_id.in.(b1),device_id.in.(d1)",
   );
+});
+
+Deno.test("parseHmsEvent accepts known events and rejects junk", () => {
+  assertEquals(parseHmsEvent("triggered"), "triggered");
+  assertEquals(parseHmsEvent("OFFLINE"), "offline");
+  assertEquals(parseHmsEvent(null), undefined);
+  assertEquals(parseHmsEvent(""), undefined);
+  assertEquals(parseHmsEvent("vibration"), null);
+  assertEquals(parseHmsEvent(7), null);
+});
+
+Deno.test("HMS fault payload requires event identity and mapped branch/device", () => {
+  assertEquals(parseHmsFaultPayload({
+    event_id: "evt-1",
+    branch_key: "BR-01",
+    device_key: "CCTV-01",
+    issue_description: "Camera offline",
+    occurred_at: "2026-10-29T08:30:00Z",
+  }), {
+    event_id: "evt-1",
+    branch_key: "BR-01",
+    device_key: "CCTV-01",
+    issue_description: "Camera offline",
+    occurred_at: "2026-10-29T08:30:00Z",
+  });
+  assertEquals(parseHmsFaultPayload({
+    event_id: "evt-1", branch_key: "BR-01", device_key: "CCTV-01",
+  }), null);
+  assertEquals(parseHmsFaultPayload({
+    event_id: "evt-1", branch_key: "BR-01", device_key: "CCTV-01",
+    issue_description: "fault", extra: "unexpected",
+  }), null);
+  assertEquals(parseHmsFaultPayload({
+    event_id: "evt-1", branch_key: "BR-01", device_key: "CCTV-01",
+    issue_description: "fault", occurred_at: "not-a-date",
+  }), null);
+});
+
+Deno.test("HMS restoration requires a correlation event ID", () => {
+  assertEquals(parseHmsRestorationPayload({
+    event_id: "restore-1",
+    correlation_event_id: "fault-1",
+  }), {
+    event_id: "restore-1",
+    correlation_event_id: "fault-1",
+    occurred_at: null,
+  });
+  assertEquals(parseHmsRestorationPayload({ event_id: "restore-1" }), null);
 });

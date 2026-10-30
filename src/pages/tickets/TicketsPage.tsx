@@ -1,7 +1,7 @@
 import { useCallback, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { CheckCircle, ChevronLeft, ChevronRight, Plus, Search, X } from 'lucide-react'
+import { CheckCircle, ChevronLeft, ChevronRight, Plus, Printer, Search, X } from 'lucide-react'
 import { apiFetch } from '../../lib/api'
 import { supabase } from '../../lib/supabase'
 import type { Ticket } from '../../types'
@@ -14,7 +14,9 @@ type TicketRow = Ticket & {
   si_user: { name: string; email: string } | null
 }
 type BranchOption = { id: string; name: string; code: string }
-type DeviceOption = { id: string; type: string; serial_number: string; status: string }
+type SiOption = { id: string; name: string; email: string }
+type TicketFilterOptions = { branches: BranchOption[]; device_types: string[]; si_users: SiOption[] }
+type DeviceOption = { id: string; type: string; serial_number: string }
 type CreatedTicket = { ticket_id: string; ticket_number: string }
 
 export default function TicketsPage() {
@@ -25,12 +27,15 @@ export default function TicketsPage() {
   const [createBranchId, setCreateBranchId] = useState('')
   const [createDeviceSerial, setCreateDeviceSerial] = useState('')
   const [createNote, setCreateNote] = useState('')
+  const [printedAt, setPrintedAt] = useState('')
   const [createdTicket, setCreatedTicket] = useState<CreatedTicket | null>(null)
   const filter = searchParams.get('filter') || 'all'
   const status = searchParams.get('status') || ''
   const level = searchParams.get('level') || ''
   const branch = searchParams.get('branch') || ''
   const device = searchParams.get('device') || ''
+  const deviceType = searchParams.get('device_type') || ''
+  const siUserId = searchParams.get('si_user_id') || ''
   const from = searchParams.get('from') || ''
   const to = searchParams.get('to') || ''
   const search = searchParams.get('search') || ''
@@ -45,11 +50,10 @@ export default function TicketsPage() {
     setSearchParams(next)
   }, [searchParams, setSearchParams])
 
-  const branchesQuery = useQuery({
-    queryKey: ['ticketBranchOptions'],
+  const filterOptionsQuery = useQuery({
+    queryKey: ['ticketFilterOptions'],
     queryFn: async () => {
-      const { data } = await apiFetch<{ data: BranchOption[] }>('/branches')
-      return data
+      return apiFetch<TicketFilterOptions>('/ticket-filters')
     },
   })
 
@@ -59,7 +63,7 @@ export default function TicketsPage() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('devices')
-        .select('id, type, serial_number, status')
+        .select('id, type, serial_number')
         .eq('branch_id', createBranchId)
         .order('serial_number')
       if (error) throw error
@@ -101,7 +105,7 @@ export default function TicketsPage() {
   }
 
   const ticketsQuery = useQuery({
-    queryKey: ['tickets', filter, status, level, branch, device, from, to, search, sort, page],
+    queryKey: ['tickets', filter, status, level, branch, device, deviceType, siUserId, from, to, search, sort, page],
     queryFn: async () => {
       const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) })
 
@@ -122,6 +126,8 @@ export default function TicketsPage() {
       if (level) params.set('escalation_level', level)
       if (branch) params.set('branch_id', branch)
       if (device.trim()) params.set('device_serial', device.trim())
+      if (deviceType) params.set('device_type', deviceType)
+      if (siUserId) params.set('si_user_id', siUserId)
       if (from) params.set('from', kolkataDayBounds(from).start)
       if (to) params.set('to', kolkataDayBounds(to).next)
       if (search.trim()) params.set('search', search.trim())
@@ -148,6 +154,18 @@ export default function TicketsPage() {
   const total = ticketsQuery.data?.total ?? 0
   const totalPages = Math.ceil(total / PAGE_SIZE)
   const setPage = (nextPage: number) => updateParam('page', String(nextPage))
+  const selectedBranch = filterOptionsQuery.data?.branches.find((item) => item.id === branch)
+  const selectedSi = filterOptionsQuery.data?.si_users.find((item) => item.id === siUserId)
+  const printContext = [
+    status ? `Status: ${status}` : '',
+    level ? `Escalation: ${level}` : '',
+    selectedBranch ? `Branch: ${selectedBranch.name} (${selectedBranch.code})` : '',
+    deviceType ? `Device: ${deviceType}` : '',
+    selectedSi ? `SI: ${selectedSi.name}` : '',
+    from ? `Created from: ${from}` : '',
+    to ? `Created through: ${to}` : '',
+    search ? `Search: ${search}` : '',
+  ].filter(Boolean).join(' · ') || 'All tickets'
 
   if (ticketsQuery.isLoading) return <p className="p-4" role="status">Loading tickets…</p>
   if (ticketsQuery.error) return (
@@ -165,6 +183,9 @@ export default function TicketsPage() {
           <p className="text-sm text-[var(--text-muted)]">{total} ticket{total === 1 ? '' : 's'}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2" aria-label="Ticket actions and presets">
+          <button type="button" onClick={() => { setPrintedAt(new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })); window.setTimeout(() => window.print(), 0) }} className="no-print inline-flex items-center gap-2 rounded-lg border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--row-hover)]">
+            <Printer className="h-4 w-4" aria-hidden="true" /> Print / Save PDF
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -178,6 +199,7 @@ export default function TicketsPage() {
           </button>
         </div>
       </div>
+      <p className="print-meta">SDesk360 tickets · {printContext} · Generated {printedAt || 'at print time'} (Asia/Kolkata)</p>
 
       {createdTicket && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border-l-4 border-[var(--border)] border-l-[var(--success)] bg-[var(--success-bg)] p-4 text-sm text-[var(--success)]" role="status">
@@ -187,7 +209,7 @@ export default function TicketsPage() {
       )}
 
       {createOpen && (
-        <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5" aria-labelledby="create-ticket-title">
+        <section className="no-print rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5" aria-labelledby="create-ticket-title">
           <div className="mb-4 flex items-start justify-between gap-3">
             <div>
               <h3 id="create-ticket-title" className="text-lg font-semibold">Create a ticket</h3>
@@ -203,18 +225,18 @@ export default function TicketsPage() {
               <label className="block text-sm font-medium text-[var(--text-primary)]">
                 Branch <span className="text-[var(--danger)]">*</span>
                 <select required value={createBranchId} onChange={(event) => { setCreateBranchId(event.target.value); setCreateDeviceSerial('') }} className="mt-1.5 block w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm text-[var(--text-primary)]">
-                  <option value="">{branchesQuery.isLoading ? 'Loading branches…' : 'Select a branch'}</option>
-                  {(branchesQuery.data ?? []).map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
+                <option value="">{filterOptionsQuery.isLoading ? 'Loading branches…' : 'Select a branch'}</option>
+                  {(filterOptionsQuery.data?.branches ?? []).map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
                 </select>
-                {branchesQuery.error && <span className="mt-1 block text-xs text-[var(--danger)]">Could not load branches: {branchesQuery.error.message}</span>}
-                {!branchesQuery.isLoading && branchesQuery.data?.length === 0 && <span className="mt-1 block text-xs text-[var(--text-muted)]">No branches are available in your account scope.</span>}
+                {filterOptionsQuery.error && <span className="mt-1 block text-xs text-[var(--danger)]">Could not load branches: {filterOptionsQuery.error.message}</span>}
+                {!filterOptionsQuery.isLoading && filterOptionsQuery.data?.branches.length === 0 && <span className="mt-1 block text-xs text-[var(--text-muted)]">No branches are available in your account scope.</span>}
               </label>
 
               <label className="block text-sm font-medium text-[var(--text-primary)]">
                 Device <span className="font-normal text-[var(--text-muted)]">(optional)</span>
                 <select value={createDeviceSerial} onChange={(event) => setCreateDeviceSerial(event.target.value)} disabled={!createBranchId || createDevicesQuery.isLoading} className="mt-1.5 block w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60">
                   <option value="">{!createBranchId ? 'Select a branch first' : createDevicesQuery.isLoading ? 'Loading devices…' : 'No specific device'}</option>
-                  {(createDevicesQuery.data ?? []).map((item) => <option key={item.id} value={item.serial_number}>{item.type} · {item.serial_number} · {item.status.replace('_', ' ')}</option>)}
+                  {(createDevicesQuery.data ?? []).map((item) => <option key={item.id} value={item.serial_number}>{item.type} · {item.serial_number}</option>)}
                 </select>
                 {createDevicesQuery.error && <span className="mt-1 block text-xs text-[var(--danger)]">Could not load devices: {createDevicesQuery.error.message}</span>}
               </label>
@@ -230,7 +252,7 @@ export default function TicketsPage() {
 
             <div className="flex flex-wrap justify-end gap-2">
               <button type="button" onClick={() => { setCreateOpen(false); createTicket.reset() }} className="rounded-lg border border-[var(--border)] px-4 py-2 text-sm hover:bg-[var(--row-hover)]">Cancel</button>
-              <button type="submit" disabled={createTicket.isPending || branchesQuery.isLoading || !branchesQuery.data?.length} className="inline-flex items-center gap-2 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] transition hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50">
+              <button type="submit" disabled={createTicket.isPending || filterOptionsQuery.isLoading || !filterOptionsQuery.data?.branches.length} className="inline-flex items-center gap-2 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] transition hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50">
                 <Plus className="h-4 w-4" />{createTicket.isPending ? 'Creating…' : 'Create ticket'}
               </button>
             </div>
@@ -238,7 +260,7 @@ export default function TicketsPage() {
         </section>
       )}
 
-      <div className="flex flex-wrap gap-2" aria-label="Ticket presets">
+      <div className="no-print flex flex-wrap gap-2" aria-label="Ticket presets">
           {[
             ['all', 'All'], ['open', 'Open'], ['resolved', 'Resolved'], ['escalated', 'Escalated'],
             ['today_open', "Today's open"], ['today_resolved', "Today's resolved"],
@@ -251,7 +273,7 @@ export default function TicketsPage() {
           ))}
       </div>
 
-      <section className="grid grid-cols-1 gap-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Ticket filters">
+      <section className="no-print grid grid-cols-1 gap-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Ticket filters">
         <label className="text-xs text-[var(--text-muted)]">Status
           <select value={status} onChange={(event) => updateParam('status', event.target.value)} className="mt-1 block w-full rounded border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text-primary)]">
             <option value="">Any status</option><option value="open">Open</option><option value="resolved">Resolved</option>
@@ -265,11 +287,23 @@ export default function TicketsPage() {
         <label className="text-xs text-[var(--text-muted)]">Branch
           <select value={branch} onChange={(event) => updateParam('branch', event.target.value)} className="mt-1 block w-full rounded border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text-primary)]">
             <option value="">All visible branches</option>
-            {(branchesQuery.data ?? []).map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
+            {(filterOptionsQuery.data?.branches ?? []).map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
           </select>
         </label>
         <label className="text-xs text-[var(--text-muted)]">Device serial
           <input value={device} onChange={(event) => updateParam('device', event.target.value)} placeholder="Search serial number" className="mt-1 block w-full rounded border border-[var(--border)] px-3 py-2 text-sm text-[var(--text-primary)]" />
+        </label>
+        <label className="text-xs text-[var(--text-muted)]">Device category
+          <select value={deviceType} onChange={(event) => updateParam('device_type', event.target.value)} className="mt-1 block w-full rounded border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text-primary)]">
+            <option value="">All categories</option>
+            {(filterOptionsQuery.data?.device_types ?? []).map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </label>
+        <label className="text-xs text-[var(--text-muted)]">Assigned SI
+          <select value={siUserId} onChange={(event) => updateParam('si_user_id', event.target.value)} className="mt-1 block w-full rounded border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text-primary)]">
+            <option value="">All SIs</option>
+            {(filterOptionsQuery.data?.si_users ?? []).map((item) => <option key={item.id} value={item.id}>{item.name || item.email}</option>)}
+          </select>
         </label>
         <label className="text-xs text-[var(--text-muted)]">Created from
           <input type="date" value={from} onChange={(event) => updateParam('from', event.target.value)} className="mt-1 block w-full rounded border border-[var(--border)] px-3 py-2 text-sm text-[var(--text-primary)]" />
@@ -315,7 +349,7 @@ export default function TicketsPage() {
         </table>
       </div>
 
-      <div className="flex items-center justify-between text-sm text-[var(--text-muted)]">
+      <div className="no-print flex items-center justify-between text-sm text-[var(--text-muted)]">
         <span>{total === 0 ? 'No results' : `Showing ${(page - 1) * PAGE_SIZE + 1}–${Math.min(page * PAGE_SIZE, total)} of ${total}`}</span>
         <div className="flex items-center gap-2">
           <span>Page {totalPages ? Math.min(page, totalPages) : 0} of {totalPages}</span>

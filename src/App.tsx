@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import Layout from './components/layout/Layout'
 import LoginPage from './pages/auth/LoginPage'
 import DashboardPage from './pages/dashboard/DashboardPage'
@@ -6,7 +6,6 @@ import TicketsPage from './pages/tickets/TicketsPage'
 import TicketDetailPage from './pages/tickets/TicketDetailPage'
 import DevicesPage from './pages/devices/DevicesPage'
 import AssignSiPage from './pages/assign-si/AssignSiPage'
-import InsightsPage from './pages/insights/InsightsPage'
 import UsersPage from './pages/users/UsersPage'
 import { ProtectedRoute, RoleRoute } from './components/route-guards/ProtectedRoute'
 import { isSupabaseConfigured } from './lib/supabase'
@@ -45,7 +44,7 @@ function App() {
             <Route path="assign-si">
               <Route index element={<RoleRoute roles={['head_office']}><AssignSiPage /></RoleRoute>} />
             </Route>
-            <Route path="insights" element={<InsightsPage />} />
+            <Route path="insights" element={<Navigate to="/" replace />} />
             <Route path="users" element={<RoleRoute roles={['head_office']}><UsersPage /></RoleRoute>} />
           </Route>
         </Route>

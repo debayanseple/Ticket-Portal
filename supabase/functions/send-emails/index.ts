@@ -5,6 +5,7 @@ const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const emailSendUrl = Deno.env.get("EMAIL_SEND_URL") || "";
 const emailApiKey = Deno.env.get("EMAIL_API_KEY") || "";
+const scheduledSecret = Deno.env.get("SCHEDULED_JOB_SECRET") || "";
 
 const supabase = createClient(supabaseUrl, serviceKey, {
   auth: { persistSession: false },
@@ -45,15 +46,13 @@ async function sendOne(email: EmailRow): Promise<{ ok: boolean; error?: string }
 }
 
 serve(async (req) => {
-  // Validate caller identity via JWT (anon key from pg_cron, or a user token).
-  const authHeader = req.headers.get("Authorization");
-  if (!authHeader) {
-    return new Response(JSON.stringify({ error: "Missing Authorization" }), { status: 401 });
+  // Only the hosted scheduled caller may drain the organization-wide outbox.
+  if (!scheduledSecret) {
+    return new Response(JSON.stringify({ error: "SCHEDULED_JOB_SECRET is not configured" }), { status: 503 });
   }
-  const token = authHeader.replace(/^Bearer\s+/, "");
-  const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-  if (authError || !user) {
-    return new Response(JSON.stringify({ error: "Invalid token" }), { status: 401 });
+  const suppliedSecret = req.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+  if (suppliedSecret !== scheduledSecret) {
+    return new Response(JSON.stringify({ error: "Unauthorized scheduled invocation" }), { status: 401 });
   }
 
   // Fetch pending emails using service role (bypasses RLS)
@@ -69,7 +68,23 @@ serve(async (req) => {
 
   const results: Array<{ id: string; ok: boolean; error?: string }> = [];
   for (const email of emails ?? []) {
-    const result = await sendOne(email as EmailRow);
+    const { data: ticket, error: ticketError } = await supabase
+      .from("tickets")
+      .select("status")
+      .eq("id", email.ticket_id)
+      .maybeSingle();
+    const result = ticketError
+      ? { ok: false, error: "Ticket status could not be verified" }
+      : ticket?.status === "resolved"
+      ? { ok: false, error: "Ticket was resolved before email delivery" }
+      : await sendOne(email as EmailRow);
+    const outcome = ticket?.status === "resolved"
+      ? "cancelled"
+      : result.ok
+      ? "sent"
+      : result.error?.includes("not configured")
+      ? "not_configured"
+      : "failed";
     await supabase
       .from("email_outbox")
       .update({
@@ -78,6 +93,10 @@ serve(async (req) => {
         sent_at: result.ok ? new Date().toISOString() : null,
       })
       .eq("id", email.id);
+    await supabase
+      .from("ticket_escalations")
+      .update({ email_outcome: outcome })
+      .eq("email_outbox_id", email.id);
     results.push({ id: email.id, ...result });
   }
 

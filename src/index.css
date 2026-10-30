@@ -105,3 +105,53 @@ textarea:focus-visible {
 table tbody tr:hover {
   background-color: var(--row-hover);
 }
+
+.print-meta {
+  display: none;
+}
+
+@media print {
+  :root,
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --background: #ffffff;
+    --surface: #ffffff;
+    --border: #d1d5db;
+    --text-primary: #111827;
+    --text-muted: #4b5563;
+  }
+
+  body,
+  main {
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  main {
+    height: auto !important;
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+
+  .print-meta {
+    display: block !important;
+    margin-bottom: 1rem;
+    color: #374151;
+    font-size: 10pt;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  tr,
+  section,
+  article {
+    break-inside: avoid;
+  }
+}

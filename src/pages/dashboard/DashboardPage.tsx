@@ -1,10 +1,11 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../../hooks/useAuth'
 import { apiFetch } from '../../lib/api'
 import type { Profile } from '../../types'
-import { AlertTriangle, Clock, CheckCircle, Mail } from 'lucide-react'
+import { AlertTriangle, Clock, CheckCircle, Mail, Printer } from 'lucide-react'
+import InsightsPage from '../insights/InsightsPage'
 
 type Role = Profile['role']
 
@@ -38,6 +39,7 @@ const WIDGETS: Array<{ key: keyof Stats; label: string; icon: React.ElementType;
 export default function DashboardPage() {
   const { profile, loading: authLoading } = useAuth()
   const navigate = useNavigate()
+  const [printedAt, setPrintedAt] = useState('')
   const role = (profile?.role ?? 'head_office') as Role
 
   const { data: stats, isLoading, error } = useQuery({
@@ -64,10 +66,16 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <h2 className="text-2xl font-semibold">Dashboard</h2>
-        <p className="text-sm text-[var(--text-muted)]">Scope: {scopeLabel(role, profile)}</p>
+        <div className="flex items-center gap-3">
+          <p className="text-sm text-[var(--text-muted)]">Scope: {scopeLabel(role, profile)}</p>
+          <button type="button" onClick={() => { setPrintedAt(new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })); window.setTimeout(() => window.print(), 0) }} className="no-print inline-flex items-center gap-2 rounded border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--row-hover)]">
+            <Printer className="h-4 w-4" aria-hidden="true" /> Print / Save PDF
+          </button>
+        </div>
       </div>
+      <p className="print-meta">SDesk360 dashboard · Scope: {scopeLabel(role, profile)} · Generated {printedAt || 'at print time'} (Asia/Kolkata)</p>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {WIDGETS.map((w) => (
@@ -120,6 +128,8 @@ export default function DashboardPage() {
           </div>
         )}
       </section>
+
+      <InsightsPage />
     </div>
   )
 }

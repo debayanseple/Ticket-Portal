@@ -63,3 +63,81 @@ export function searchParts(
   if (deviceIds.length > 0) parts.push(`device_id.in.(${deviceIds.join(",")})`);
   return parts.join(",");
 }
+
+// HMS (Dexter) events that justify raising a ticket. undefined = not supplied,
+// null = invalid value.
+export const HMS_EVENTS = ["triggered", "offline", "inactive"] as const;
+export type HmsEvent = (typeof HMS_EVENTS)[number];
+
+export function parseHmsEvent(value: unknown): HmsEvent | undefined | null {
+  if (value == null || value === "") return undefined;
+  if (typeof value !== "string") return null;
+  const normalized = value.toLowerCase();
+  return (HMS_EVENTS as readonly string[]).includes(normalized)
+    ? (normalized as HmsEvent)
+    : null;
+}
+
+export interface HmsFaultPayload {
+  event_id: string;
+  branch_key: string;
+  device_key: string;
+  issue_description: string;
+  occurred_at: string | null;
+}
+
+export interface HmsRestorationPayload {
+  event_id: string;
+  correlation_event_id: string;
+  occurred_at: string | null;
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 64 &&
+    !Number.isNaN(Date.parse(value));
+}
+
+function boundedString(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.trim().length > 0 &&
+    value.trim().length <= max;
+}
+
+export function parseHmsFaultPayload(
+  value: unknown,
+): HmsFaultPayload | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  const allowed = new Set([
+    "event_id", "branch_key", "device_key", "issue_description", "occurred_at",
+  ]);
+  if (Object.keys(body).some((key) => !allowed.has(key))) return null;
+  if (!boundedString(body.event_id, 200) ||
+    !boundedString(body.branch_key, 200) ||
+    !boundedString(body.device_key, 200) ||
+    !boundedString(body.issue_description, 2000)) return null;
+  if (body.occurred_at != null && !isIsoTimestamp(body.occurred_at)) return null;
+  return {
+    event_id: body.event_id.trim(),
+    branch_key: body.branch_key.trim(),
+    device_key: body.device_key.trim(),
+    issue_description: body.issue_description.trim(),
+    occurred_at: typeof body.occurred_at === "string" ? body.occurred_at : null,
+  };
+}
+
+export function parseHmsRestorationPayload(
+  value: unknown,
+): HmsRestorationPayload | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  const allowed = new Set(["event_id", "correlation_event_id", "occurred_at"]);
+  if (Object.keys(body).some((key) => !allowed.has(key))) return null;
+  if (!boundedString(body.event_id, 200) ||
+    !boundedString(body.correlation_event_id, 200)) return null;
+  if (body.occurred_at != null && !isIsoTimestamp(body.occurred_at)) return null;
+  return {
+    event_id: body.event_id.trim(),
+    correlation_event_id: body.correlation_event_id.trim(),
+    occurred_at: typeof body.occurred_at === "string" ? body.occurred_at : null,
+  };
+}

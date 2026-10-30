@@ -8,7 +8,22 @@ const supabase = createClient(supabaseUrl, serviceKey, {
   auth: { persistSession: false },
 });
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Max-Age": "86400",
+};
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
 interface InviteBody {
+  name?: string;
   email: string;
   role: "head_office" | "nbg" | "zonal" | "branch" | "si";
   scope_id?: string | null;
@@ -16,19 +31,22 @@ interface InviteBody {
 }
 
 serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
   if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405 });
+    return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
   // Validate caller identity and HO role
   const authHeader = req.headers.get("Authorization");
   if (!authHeader) {
-    return new Response(JSON.stringify({ error: "Missing Authorization" }), { status: 401 });
+    return jsonResponse({ error: "Missing Authorization" }, 401);
   }
   const token = authHeader.replace(/^Bearer\s+/, "");
   const { data: { user }, error: authError } = await supabase.auth.getUser(token);
   if (authError || !user) {
-    return new Response(JSON.stringify({ error: "Invalid token" }), { status: 401 });
+    return jsonResponse({ error: "Invalid token" }, 401);
   }
 
   const { data: callerProfile } = await supabase
@@ -37,18 +55,22 @@ serve(async (req) => {
     .eq("id", user.id)
     .single();
   if (!callerProfile || callerProfile.role !== "head_office") {
-    return new Response(JSON.stringify({ error: "Head Office only" }), { status: 403 });
+    return jsonResponse({ error: "Head Office only" }, 403);
   }
 
   let body: InviteBody;
   try {
     body = await req.json();
   } catch {
-    return new Response(JSON.stringify({ error: "Invalid JSON body" }), { status: 400 });
+    return jsonResponse({ error: "Invalid JSON body" }, 400);
   }
-  const { email, role, scope_id, scope_type } = body;
+  const { name, email, role, scope_id, scope_type } = body;
   if (!email || !role) {
-    return new Response(JSON.stringify({ error: "email and role are required" }), { status: 400 });
+    return jsonResponse({ error: "email and role are required" }, 400);
+  }
+  const cleanName = name?.trim() || email.split("@")[0];
+  if (cleanName.length > 120) {
+    return jsonResponse({ error: "name cannot exceed 120 characters" }, 400);
   }
 
   const nbg_id = scope_type === "nbg" ? scope_id : null;
@@ -60,20 +82,17 @@ serve(async (req) => {
     email,
     password: "SWatch123!",
     email_confirm: true,
-    user_metadata: { role },
+    user_metadata: { role, name: cleanName },
   });
   if (createErr || !created.user) {
-    return new Response(
-      JSON.stringify({ error: createErr?.message ?? "Failed to create user" }),
-      { status: 400 },
-    );
+    return jsonResponse({ error: createErr?.message ?? "Failed to create user" }, 400);
   }
 
   // Create the profile
   const { error: profileErr } = await supabase.from("profiles").insert({
     id: created.user.id,
     email,
-    name: email.split("@")[0],
+    name: cleanName,
     role,
     nbg_id,
     zone_id,
@@ -82,11 +101,8 @@ serve(async (req) => {
   if (profileErr) {
     // Best-effort cleanup: remove the auth user if profile insert fails
     await supabase.auth.admin.deleteUser(created.user.id);
-    return new Response(JSON.stringify({ error: profileErr.message }), { status: 400 });
+    return jsonResponse({ error: profileErr.message }, 400);
   }
 
-  return new Response(
-    JSON.stringify({ ok: true, user: { id: created.user.id, email, role } }),
-    { headers: { "Content-Type": "application/json" } },
-  );
+  return jsonResponse({ ok: true, user: { id: created.user.id, email, role } });
 });

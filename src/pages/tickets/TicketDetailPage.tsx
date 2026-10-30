@@ -20,15 +20,25 @@ type TicketDetail = {
   resolved_at: string | null
   resolved_by: string | null
   resolution_note: string | null
+  issue_description: string
+  source_system: string | null
+  source_event_id: string | null
+  assigned_si_name: string | null
+  assigned_si_email: string | null
   branches: { name: string; code: string; zones: { name: string; nbgs: { name: string } | null } | null } | null
-  devices: { type: string; serial_number: string; status: string; status_since: string } | null
+  devices: { type: string; serial_number: string } | null
   si_user: { id: string; name: string; email: string } | null
   resolver: { name: string; email: string } | null
+  current_si_assignment: { si_user_id: string; profiles: { id: string; name: string; email: string } | null } | null
   ticket_events: TimelineItem[]
+  hms_events: HmsSourceEvent[]
+  ticket_escalations: EscalationItem[]
   email_outbox: EmailItem[]
 }
 type TimelineItem = TicketEvent & { actor: { name: string; email: string } | null }
 type EmailItem = { id: string; subject: string; status: string; sent_at: string | null; created_at: string; error: string | null }
+type HmsSourceEvent = { id: string; source_event_id: string; event_type: string; correlation_event_id: string | null; issue_description: string | null; occurred_at: string | null; received_at: string; processing_status: string }
+type EscalationItem = { id: string; escalation_level: number; due_at: string; processed_at: string; recipient: string | null; email_outcome: string }
 
 export default function TicketDetailPage() {
   const { ticketId } = useParams()
@@ -99,11 +109,31 @@ export default function TicketDetailPage() {
         <Info label="Branch" value={`${ticket.branches?.name ?? '—'}${ticket.branches?.code ? ` (${ticket.branches.code})` : ''}`} />
         <Info label="Region" value={[ticket.branches?.zones?.nbgs?.name, ticket.branches?.zones?.name].filter(Boolean).join(' / ') || '—'} />
         <Info label="Device" value={ticket.devices ? `${ticket.devices.type} · ${ticket.devices.serial_number}` : '—'} />
-        <Info label="Device status" value={ticket.devices ? `${ticket.devices.status.replace('_', ' ')} since ${formatDate(ticket.devices.status_since)}` : '—'} />
-        <Info label="Assigned SI" value={ticket.si_user?.name ?? (ticket.si_user_id === profile?.id ? profile.name : ticket.si_user?.email) ?? '—'} />
+        <Info label="Assigned SI at ticket creation" value={ticket.assigned_si_name ?? ticket.assigned_si_email ?? ticket.si_user?.name ?? ticket.si_user?.email ?? '—'} />
+        <Info label="Current device SI" value={ticket.current_si_assignment?.profiles?.name ?? ticket.current_si_assignment?.profiles?.email ?? 'No active SI assignment'} />
+        <Info label="Issue description" value={ticket.issue_description || '—'} />
         <Info label="Resolved" value={ticket.resolved_at ? `${formatDate(ticket.resolved_at)}${ticket.resolver?.name ? ` by ${ticket.resolver.name}` : ''}` : 'Not resolved'} />
         {ticket.resolution_note && <div className="sm:col-span-2"><Info label="Resolution note" value={ticket.resolution_note} /></div>}
       </section>
+
+      {ticket.hms_events.length > 0 && <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
+        <h3 className="mb-3 font-semibold">HMS source events</h3>
+        <ul className="space-y-3">{ticket.hms_events.map((event) => <li key={event.id} className="border-b border-[var(--border)]/50 pb-3 last:border-0 last:pb-0">
+          <p className="font-medium">{event.event_type === 'fault' ? 'Fault' : 'Restoration'} · {event.processing_status}</p>
+          <p className="break-all text-xs text-[var(--text-muted)]">Event {event.source_event_id}{event.correlation_event_id ? ` · Correlates to ${event.correlation_event_id}` : ''}</p>
+          {event.issue_description && <p className="mt-1 text-sm">{event.issue_description}</p>}
+          <p className="mt-1 text-xs text-[var(--text-muted)]">Occurred {event.occurred_at ? formatDate(event.occurred_at) : 'time not supplied'} · Received {formatDate(event.received_at)}</p>
+        </li>)}</ul>
+        {ticket.source_system && <p className="mt-3 text-xs text-[var(--text-muted)]">Primary source: {ticket.source_system} · {ticket.source_event_id}</p>}
+      </section>}
+
+      {ticket.ticket_escalations.length > 0 && <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
+        <h3 className="mb-3 font-semibold">Escalation history</h3>
+        <ol className="space-y-2">{ticket.ticket_escalations.map((item) => <li key={item.id} className="flex flex-wrap justify-between gap-2 text-sm">
+          <span>Level {item.escalation_level} · due {formatDate(item.due_at)}</span>
+          <span className="text-[var(--text-muted)]">{item.email_outcome}{item.recipient ? ` · ${item.recipient}` : ''}</span>
+        </li>)}</ol>
+      </section>}
 
       {canManage && <section className="space-y-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5" aria-label="Ticket actions">
         <h3 className="font-semibold">Update ticket</h3>
