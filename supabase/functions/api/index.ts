@@ -531,24 +531,51 @@ async function createTicket(req: Request): Promise<Response> {
   const body = await readJsonObject(req);
   if (!body) return json({ error: "Body must be a JSON object" }, 400);
 
-  const branchId = body.branch_id;
-  if (typeof branchId !== "string" || !isUuid(branchId)) {
-    return json({ error: "branch_id is required and must be a UUID" }, 400);
+  // The caller supplies the device identifier from its device list. Resolve
+  // either our UUID or the device serial number, then derive the branch.
+  const deviceIdentifier = typeof body.device_id === "string"
+    ? body.device_id.trim()
+    : "";
+  if (!deviceIdentifier || deviceIdentifier.length > 200) {
+    return json({ error: "device_id is required (device UUID or serial number)" }, 400);
   }
 
-  const deviceId = body.device_id;
-  if (deviceId != null && (typeof deviceId !== "string" || !isUuid(deviceId))) {
-    return json({ error: "device_id must be a UUID" }, 400);
+  const suppliedBranchId = body.branch_id;
+  if (suppliedBranchId != null &&
+    (typeof suppliedBranchId !== "string" || !isUuid(suppliedBranchId))) {
+    return json({ error: "branch_id must be a UUID when supplied" }, 400);
   }
 
-  const siInput = body.si_user_id;
-  if (siInput != null && (typeof siInput !== "string" || !isUuid(siInput))) {
-    return json({ error: "si_user_id must be a UUID" }, 400);
-  }
-
-  const note = typeof body.note === "string" ? body.note.trim() : "";
+  const noteInput = body.issue_description ?? body.note;
+  const note = typeof noteInput === "string" ? noteInput.trim() : "";
   if (note.length > 2000) {
     return json({ error: "note cannot exceed 2000 characters" }, 400);
+  }
+
+  let device: { id: string; branch_id: string } | null = null;
+  if (isUuid(deviceIdentifier)) {
+    const { data, error } = await admin
+      .from("devices")
+      .select("id, branch_id")
+      .eq("id", deviceIdentifier)
+      .maybeSingle();
+    if (error) return json({ error: error.message }, 500);
+    device = data;
+  }
+  if (!device) {
+    const { data, error } = await admin
+      .from("devices")
+      .select("id, branch_id")
+      .eq("serial_number", deviceIdentifier)
+      .maybeSingle();
+    if (error) return json({ error: error.message }, 500);
+    device = data;
+  }
+  if (!device) return json({ error: "Device not found" }, 404);
+
+  const branchId = device.branch_id;
+  if (typeof suppliedBranchId === "string" && suppliedBranchId !== branchId) {
+    return json({ error: "Device does not belong to the given branch" }, 400);
   }
 
   const { data: branch, error: branchError } = await admin
@@ -557,68 +584,40 @@ async function createTicket(req: Request): Promise<Response> {
     .eq("id", branchId)
     .maybeSingle();
   if (branchError) return json({ error: branchError.message }, 500);
-  if (!branch) return json({ error: "Branch not found" }, 404);
+  if (!branch) return json({ error: "Device branch not found" }, 404);
 
-  if (deviceId) {
-    const { data: device, error } = await admin
-      .from("devices")
-      .select("id, branch_id")
-      .eq("id", deviceId)
-      .maybeSingle();
-    if (error) return json({ error: error.message }, 500);
-    if (!device) return json({ error: "Device not found" }, 404);
-    if (device.branch_id !== branchId) {
-      return json({ error: "Device does not belong to the given branch" }, 400);
-    }
-  }
-
-  let siUserId = typeof siInput === "string" ? siInput : null;
+  let siUserId: string | null = null;
   let siSnapshot: { name: string; email: string } | null = null;
-  if (siUserId) {
-    const { data: si, error: siError } = await admin
-      .from("profiles")
-      .select("id, role, name, email")
-      .eq("id", siUserId)
+  let assignedProfile: { name: string; email: string } | null = null;
+  const { data: deviceAssignment, error: deviceAssignmentError } = await admin
+    .from("device_si_assignments")
+    .select("si_user_id, profiles:profiles!device_si_assignments_si_user_id_fkey (name, email)")
+    .eq("device_id", device.id)
+    .eq("is_active", true)
+    .maybeSingle();
+  if (deviceAssignmentError) return json({ error: deviceAssignmentError.message }, 500);
+  siUserId = deviceAssignment?.si_user_id ?? null;
+  assignedProfile = deviceAssignment?.profiles as unknown as { name: string; email: string } | null;
+  if (!siUserId) {
+    const { data: assignment, error: assignmentError } = await admin
+      .from("branch_si_assignments")
+      .select("si_user_id, profiles:profiles!branch_si_assignments_si_user_id_fkey (name, email)")
+      .eq("branch_id", branchId)
+      .eq("is_active", true)
+      .order("assigned_at", { ascending: false })
+      .limit(1)
       .maybeSingle();
-    if (siError) return json({ error: siError.message }, 500);
-    if (!si || si.role !== "si") {
-      return json({ error: "si_user_id must reference an SI user" }, 400);
-    }
-    siSnapshot = { name: si.name, email: si.email };
-  } else {
-    let assignedProfile: { name: string; email: string } | null = null;
-    if (deviceId) {
-      const { data: deviceAssignment, error: deviceAssignmentError } = await admin
-        .from("device_si_assignments")
-        .select("si_user_id, profiles:profiles!device_si_assignments_si_user_id_fkey (name, email)")
-        .eq("device_id", deviceId)
-        .eq("is_active", true)
-        .maybeSingle();
-      if (deviceAssignmentError) return json({ error: deviceAssignmentError.message }, 500);
-      siUserId = deviceAssignment?.si_user_id ?? null;
-      assignedProfile = deviceAssignment?.profiles as unknown as { name: string; email: string } | null;
-    }
-    if (!siUserId) {
-      const { data: assignment, error: assignmentError } = await admin
-        .from("branch_si_assignments")
-        .select("si_user_id, profiles:profiles!branch_si_assignments_si_user_id_fkey (name, email)")
-        .eq("branch_id", branchId)
-        .eq("is_active", true)
-        .order("assigned_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (assignmentError) return json({ error: assignmentError.message }, 500);
-      siUserId = assignment?.si_user_id ?? null;
-      assignedProfile = assignment?.profiles as unknown as { name: string; email: string } | null;
-    }
-    if (assignedProfile) siSnapshot = assignedProfile;
+    if (assignmentError) return json({ error: assignmentError.message }, 500);
+    siUserId = assignment?.si_user_id ?? null;
+    assignedProfile = assignment?.profiles as unknown as { name: string; email: string } | null;
   }
+  if (assignedProfile) siSnapshot = assignedProfile;
 
   const { data: ticket, error: insertError } = await admin
     .from("tickets")
     .insert({
       branch_id: branchId,
-      device_id: (deviceId as string | undefined) ?? null,
+      device_id: device.id,
       si_user_id: siUserId,
       status: "open",
       issue_description: note,

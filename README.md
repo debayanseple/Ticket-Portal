@@ -190,15 +190,18 @@ curl -X POST https://<project>.supabase.co/functions/v1/api/auth/login \
 curl "https://<project>.supabase.co/functions/v1/api/tickets?status=open&page=1&limit=20" \
   -H "Authorization: Bearer <access_token>"
 
-# 3. Push a ticket from an external system
+# 3. Create a ticket. Use the device UUID or serial number shown on the Devices page.
+#    The API finds the device and gets its branch automatically.
 curl -X POST https://<project>.supabase.co/functions/v1/api/tickets \
-  -H "x-api-key: <TICKETS_API_KEY>" \
+  -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
-  -d '{"branch_id":"33333333-3333-3333-3333-333333333301","device_id":"d0000001-0000-0000-0000-000000000002","note":"ATM offline reported by monitoring"}'
+  -d '{"device_id":"SN-ATM-001","issue_description":"ATM offline reported by monitoring"}'
 ```
 
-`POST /tickets` requires `branch_id`; `device_id` must belong to that branch; `si_user_id` defaults
-to the branch's active SI. Ticket numbers come from the existing sequence.
+`POST /tickets` requires `device_id`, which can be the device UUID or its exact serial number. The
+API matches it to the Devices list, derives the branch, and assigns the device's active SI (falling
+back to the branch SI when no device assignment exists). `branch_id` is optional; if supplied, it
+must match the device's branch. Ticket numbers come from the existing sequence.
 
 The React app uses this API for login/session, the dashboard, the ticket list and ticket detail.
 Ticket notes and resolution still go through the existing Supabase RPCs. Apply migration
